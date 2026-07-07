@@ -231,8 +231,8 @@
     <section class="hero">
       <h1>Voice Questionnaire</h1>
       <p>
-        Record an answer for any question that applies to you. Your recordings stay
-        on this page until you click Save and Exit.
+        Record an answer for any question that applies to you. After you stop a recording,
+        it uploads quietly in the background while you continue.
       </p>
     </section>
 
@@ -272,7 +272,7 @@
 
     <div id="finishBar" class="finish-bar">
       <div id="finishSummary" class="finish-summary">
-        0 answers ready to save
+        0 answers recorded
       </div>
       <button id="finishBtn" class="finish-btn" type="button">
         Save and Exit
@@ -282,14 +282,29 @@
 
   <script src="questions.js"></script>
   <script>
-    // IMPORTANT:
-    // Keep your existing deployed Google Apps Script URL here.
-    // It must end with /exec.
+    /*
+     * IWK Voice Questionnaire — Fast Background Upload version
+     *
+     * Speed improvements:
+     * - starts uploading immediately after Stop Recording
+     * - keeps at most 2 uploads active at once
+     * - records speech at 32 kbps instead of 64 kbps
+     * - Save and Exit waits only for unfinished uploads
+     * - final backend step verifies expected audio files exist in Drive
+     */
+
     const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbxc7-ANU7tT1Oq7ki3kA6IrC5BeiveVT0P9iQDIr9J5z7sFnxei0LH4bFJpmRbcQhj4/exec';
+    const MAX_CONCURRENT_UPLOADS = 2;
+    const AUDIO_BITS_PER_SECOND = 32000;
+    const MAX_UPLOAD_ATTEMPTS = 3;
 
     const questions = Array.isArray(window.QUESTIONS) ? window.QUESTIONS : [];
     const sessionId = createSessionId();
     const states = {};
+
+    const uploadQueue = [];
+    let activeUploadCount = 0;
+    let lockedRespondentName = '';
 
     function createSessionId() {
       if (window.crypto && crypto.randomUUID) {
@@ -301,6 +316,10 @@
         Math.random().toString(36).slice(2) + '_' +
         Math.random().toString(36).slice(2)
       );
+    }
+
+    function delay(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     function chooseMimeType() {
@@ -372,9 +391,17 @@
           chunks: [],
           blob: null,
           objectUrl: null,
+
+          revision: 0,
+          uploadedRevision: 0,
+          queuedRevision: 0,
+
+          uploadChain: Promise.resolve(),
+          latestUploadPromise: null,
+          lastUploadError: null,
+
           stopPromise: null,
-          stopResolve: null,
-          saved: false
+          stopResolve: null
         };
 
         document
@@ -406,7 +433,22 @@
         return null;
       }
 
+      if (lockedRespondentName && respondentName !== lockedRespondentName) {
+        alert(
+          'The respondent name cannot be changed after background uploading starts.'
+        );
+        nameInput.value = lockedRespondentName;
+        return null;
+      }
+
       return { respondentName, accessCode };
+    }
+
+    function lockIdentity(identity) {
+      if (!lockedRespondentName) {
+        lockedRespondentName = identity.respondentName;
+        document.getElementById('respondentName').disabled = true;
+      }
     }
 
     async function toggleRecording(index) {
@@ -436,7 +478,10 @@
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const preferredMimeType = chooseMimeType();
 
-        const options = { audioBitsPerSecond: 64000 };
+        const options = {
+          audioBitsPerSecond: AUDIO_BITS_PER_SECOND
+        };
+
         if (preferredMimeType) {
           options.mimeType = preferredMimeType;
         }
@@ -445,15 +490,14 @@
         try {
           recorder = new MediaRecorder(stream, options);
         } catch (err) {
+          // Browser fallback if a MIME/bitrate combination is rejected.
           recorder = new MediaRecorder(stream);
         }
 
         state.stream = stream;
         state.recorder = recorder;
         state.chunks = [];
-        state.saved = false;
-
-        state.stopPromise = new Promise((resolve) => {
+        state.stopPromise = new Promise(resolve => {
           state.stopResolve = resolve;
         });
 
@@ -471,6 +515,8 @@
             'audio/webm';
 
           state.blob = new Blob(state.chunks, { type: actualMime });
+          state.revision += 1;
+          state.lastUploadError = null;
 
           if (state.stream) {
             state.stream.getTracks().forEach(track => track.stop());
@@ -489,17 +535,15 @@
           pauseBtn.style.display = 'none';
           pauseBtn.textContent = 'Pause';
 
-          setStatus(
-            index,
-            'Recorded. It will be saved when you click Save and Exit.',
-            'success'
-          );
+          setStatus(index, 'Recorded. Uploading quietly in the background…', '');
 
           if (state.stopResolve) {
             state.stopResolve();
             state.stopResolve = null;
           }
 
+          lockIdentity(identity);
+          scheduleLatestUpload(index, identity);
           updateFinishSummary();
         };
 
@@ -553,12 +597,154 @@
       }
     }
 
+    function enqueueUploadTask(taskFn) {
+      return new Promise((resolve, reject) => {
+        uploadQueue.push({ taskFn, resolve, reject });
+        pumpUploadQueue();
+      });
+    }
+
+    function pumpUploadQueue() {
+      while (
+        activeUploadCount < MAX_CONCURRENT_UPLOADS &&
+        uploadQueue.length > 0
+      ) {
+        const job = uploadQueue.shift();
+        activeUploadCount += 1;
+        updateFinishSummary();
+
+        Promise.resolve()
+          .then(job.taskFn)
+          .then(job.resolve, job.reject)
+          .finally(() => {
+            activeUploadCount -= 1;
+            updateFinishSummary();
+            pumpUploadQueue();
+          });
+      }
+    }
+
+    function scheduleLatestUpload(index, identity) {
+      const state = states[index];
+
+      if (!state.blob) {
+        return Promise.resolve();
+      }
+
+      const revision = state.revision;
+      const blob = state.blob;
+
+      if (state.queuedRevision >= revision) {
+        return state.latestUploadPromise || Promise.resolve();
+      }
+
+      state.queuedRevision = revision;
+
+      /*
+       * Serialize uploads for the same question so that a re-recording can
+       * never be overwritten later by an older upload finishing out of order.
+       */
+      const scheduled = state.uploadChain
+        .catch(() => undefined)
+        .then(() =>
+          enqueueUploadTask(async () => {
+            // If a newer re-recording exists and this job has not started yet,
+            // skip the stale revision to save bandwidth.
+            if (state.revision !== revision) {
+              return { skipped: true, revision };
+            }
+
+            setStatus(index, 'Uploading in the background…', '');
+
+            await uploadBlobWithRetry(
+              index,
+              revision,
+              blob,
+              identity,
+              MAX_UPLOAD_ATTEMPTS
+            );
+
+            return { skipped: false, revision };
+          })
+        );
+
+      state.uploadChain = scheduled;
+
+      state.latestUploadPromise = scheduled
+        .then(result => {
+          if (!result.skipped && state.revision === revision) {
+            state.uploadedRevision = revision;
+            state.lastUploadError = null;
+            setStatus(index, 'Saved in the background.', 'success');
+          }
+          updateFinishSummary();
+          return result;
+        })
+        .catch(err => {
+          if (state.revision === revision) {
+            state.lastUploadError = err;
+            setStatus(
+              index,
+              'Background upload paused. Save and Exit will retry it.',
+              'error'
+            );
+          }
+          updateFinishSummary();
+          throw err;
+        });
+
+      return state.latestUploadPromise;
+    }
+
+    async function uploadBlobWithRetry(
+      index,
+      revision,
+      blob,
+      identity,
+      maxAttempts
+    ) {
+      let lastError = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const audioBase64 = await blobToBase64(blob);
+
+          await submitUploadAndWait({
+            action: 'upload',
+            accessCode: identity.accessCode,
+            respondentName: identity.respondentName,
+            sessionId: sessionId,
+            questionNumber: String(index + 1),
+            revision: String(revision),
+            mimeType: blob.type || 'audio/webm',
+            audioBase64: audioBase64
+          });
+
+          return;
+        } catch (err) {
+          lastError = err;
+          console.error(
+            `Question ${index + 1} upload attempt ${attempt} failed:`,
+            err
+          );
+
+          if (attempt < maxAttempts) {
+            await delay(700 * attempt);
+          }
+        }
+      }
+
+      throw lastError || new Error('Upload failed.');
+    }
+
     async function stopActiveRecordings() {
       const waits = [];
 
       for (const state of Object.values(states)) {
         if (state.recorder && state.recorder.state !== 'inactive') {
-          if (state.stopPromise) waits.push(state.stopPromise);
+          if (state.stopPromise) {
+            waits.push(state.stopPromise);
+          }
           state.recorder.stop();
         }
       }
@@ -584,10 +770,10 @@
     }
 
     /*
-     * Cross-origin-safe uploader:
-     * - submits each recording through a hidden iframe
-     * - waits for the iframe's second load event
-     * - does NOT depend on postMessage callbacks
+     * Cross-origin-compatible upload:
+     * - submits to Apps Script through a hidden iframe
+     * - waits for the Apps Script response page to finish loading
+     * - final Save and Exit performs authoritative Drive verification
      */
     function submitUploadAndWait(fields) {
       return new Promise((resolve, reject) => {
@@ -600,7 +786,7 @@
         }
 
         const requestId = createSessionId();
-        const frameName = `save_frame_${requestId}`;
+        const frameName = `upload_frame_${requestId}`;
 
         const iframe = document.createElement('iframe');
         iframe.name = frameName;
@@ -637,27 +823,24 @@
           if (finished) return;
           finished = true;
           cleanup();
-          reject(new Error('Saving timed out. Please try again.'));
+          reject(new Error('Upload timed out.'));
         }, 120000);
 
         iframe.onload = () => {
           if (finished) return;
 
-          // First load is the initial blank iframe.
           if (!submitted) {
             submitted = true;
             form.submit();
             return;
           }
 
-          // Second load is the Apps Script response.
           finished = true;
           clearTimeout(timer);
           cleanup();
           resolve();
         };
 
-        // Force a predictable first load event.
         iframe.src = 'about:blank';
       });
     }
@@ -694,6 +877,19 @@
       el.className = `status ${kind || ''}`;
     }
 
+    function getRecordedEntries() {
+      return Object.entries(states).filter(([, state]) => state.blob);
+    }
+
+    function countFullyUploadedLatestRevisions() {
+      return Object.values(states).filter(
+        state =>
+          state.blob &&
+          state.uploadedRevision === state.revision &&
+          !state.lastUploadError
+      ).length;
+    }
+
     function updateFinishSummary(customText = '') {
       const summary = document.getElementById('finishSummary');
 
@@ -702,9 +898,58 @@
         return;
       }
 
-      const ready = Object.values(states).filter(s => s.blob).length;
+      const recorded = getRecordedEntries().length;
+      const uploaded = countFullyUploadedLatestRevisions();
+      const busy = activeUploadCount + uploadQueue.length;
+
+      if (!recorded) {
+        summary.textContent = '0 answers recorded';
+        return;
+      }
+
+      if (uploaded === recorded && busy === 0) {
+        summary.textContent =
+          `${recorded} answer${recorded === 1 ? '' : 's'} ready to finish`;
+        return;
+      }
+
       summary.textContent =
-        `${ready} answer${ready === 1 ? '' : 's'} ready to save`;
+        `${recorded} recorded · ${uploaded} saved in background` +
+        (busy > 0 ? ` · ${busy} upload${busy === 1 ? '' : 's'} in progress` : '');
+    }
+
+    async function ensureLatestUploads(identity) {
+      const recordedEntries = getRecordedEntries();
+
+      // Schedule anything that has not yet been queued.
+      for (const [indexText] of recordedEntries) {
+        scheduleLatestUpload(Number(indexText), identity);
+      }
+
+      let promises = recordedEntries
+        .map(([, state]) => state.latestUploadPromise)
+        .filter(Boolean);
+
+      if (promises.length) {
+        await Promise.allSettled(promises);
+      }
+
+      // Retry only the latest revisions that are still not uploaded.
+      const retryPromises = [];
+
+      for (const [indexText, state] of recordedEntries) {
+        const index = Number(indexText);
+
+        if (state.uploadedRevision !== state.revision) {
+          state.lastUploadError = null;
+          state.queuedRevision = state.revision - 1;
+          retryPromises.push(scheduleLatestUpload(index, identity));
+        }
+      }
+
+      if (retryPromises.length) {
+        await Promise.allSettled(retryPromises);
+      }
     }
 
     async function finalizeQuestionnaire() {
@@ -716,12 +961,13 @@
       finishBtn.textContent = 'Saving…';
 
       try {
-        // If the respondent clicks Save and Exit while still recording,
-        // stop the active recording(s) first and keep the final audio.
+        /*
+         * If Save and Exit is clicked while recording, stop first.
+         * onstop immediately schedules that final answer for background upload.
+         */
         await stopActiveRecordings();
 
-        const recordedEntries = Object.entries(states)
-          .filter(([, state]) => state.blob);
+        const recordedEntries = getRecordedEntries();
 
         if (!recordedEntries.length) {
           alert('Please record at least one answer before saving.');
@@ -731,57 +977,49 @@
           return;
         }
 
-        const answeredNumbers = [];
+        lockIdentity(identity);
 
-        for (let pos = 0; pos < recordedEntries.length; pos++) {
-          const [indexText, state] = recordedEntries[pos];
-          const index = Number(indexText);
-          const questionNumber = index + 1;
+        updateFinishSummary('Finishing any remaining uploads…');
+        await ensureLatestUploads(identity);
 
-          updateFinishSummary(
-            `Saving answer ${pos + 1} of ${recordedEntries.length}…`
+        const failedQuestions = getRecordedEntries()
+          .filter(([, state]) => state.uploadedRevision !== state.revision)
+          .map(([indexText]) => Number(indexText) + 1);
+
+        if (failedQuestions.length) {
+          throw new Error(
+            'Could not finish uploading question(s): ' +
+            failedQuestions.join(', ')
           );
-
-          setStatus(index, 'Saving to Google Drive…', '');
-
-          const audioBase64 = await blobToBase64(state.blob);
-
-          await submitUploadAndWait({
-            action: 'upload',
-            accessCode: identity.accessCode,
-            respondentName: identity.respondentName,
-            sessionId: sessionId,
-            questionNumber: String(questionNumber),
-            mimeType: state.blob.type || 'audio/webm',
-            audioBase64: audioBase64
-          });
-
-          state.saved = true;
-          answeredNumbers.push(questionNumber);
-          setStatus(index, 'Saved successfully.', 'success');
         }
 
-        updateFinishSummary('All recordings saved. Finishing…');
+        const answeredNumbers = getRecordedEntries()
+          .map(([indexText]) => Number(indexText) + 1)
+          .sort((a, b) => a - b);
+
+        updateFinishSummary('All uploads complete. Verifying saved files…');
         finishBtn.textContent = 'Finishing…';
 
         /*
-         * Navigate directly to the Apps Script completion response.
-         * The backend verifies the expected Qxx files exist before showing
-         * the thank-you page.
+         * Navigate to the backend completion endpoint.
+         * The backend verifies the expected Qxx files exist in Drive.
+         * Only then does it show the thank-you page.
          */
         submitCompletionPage({
           action: 'complete',
           accessCode: identity.accessCode,
-          respondentName: identity.respondentName,
+          respondentName: lockedRespondentName || identity.respondentName,
           sessionId: sessionId,
           answeredQuestions: answeredNumbers.join(',')
         });
 
       } catch (err) {
         console.error(err);
+
         alert(
-          'The recordings could not all be saved. Please keep this page open and try Save and Exit again.'
+          'Some recordings could not be saved yet. Please keep this page open and click Save and Exit again.'
         );
+
         finishBtn.disabled = false;
         finishBtn.textContent = 'Save and Exit';
         updateFinishSummary();
