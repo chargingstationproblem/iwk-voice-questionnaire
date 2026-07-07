@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IWK Voice Questionnaire</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --card: #ffffff;
+      --text: #1f2937;
+      --muted: #667085;
+      --border: #d0d5dd;
+      --primary: #175cd3;
+      --primary-dark: #004eeb;
+      --danger: #b42318;
+      --warning: #b54708;
+      --success: #067647;
+      --success-bg: #ecfdf3;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    .container {
+      width: min(920px, calc(100% - 28px));
+      margin: 28px auto 60px;
+    }
+
+    .hero, .card, .respondent-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 2px 10px rgba(16, 24, 40, 0.05);
+    }
+
+    .hero {
+      padding: 24px;
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.7rem, 3vw, 2.2rem);
+    }
+
+    .hero p {
+      margin: 6px 0 0;
+      color: var(--muted);
+    }
+
+    .respondent-card {
+      padding: 20px;
+      margin-bottom: 18px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 12px 13px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      font-size: 1rem;
+    }
+
+    input:focus {
+      outline: 3px solid rgba(23, 92, 211, 0.15);
+      border-color: var(--primary);
+    }
+
+    .privacy-note {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 9px;
+      background: #f9fafb;
+      color: var(--muted);
+      font-size: 0.93rem;
+    }
+
+    .card {
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    .question-number {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--primary);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .question-text {
+      margin: 7px 0 16px;
+      font-size: 1.08rem;
+      white-space: pre-wrap;
+    }
+
+    .controls {
+      display: flex;
+      gap: 9px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    button {
+      border: 0;
+      border-radius: 9px;
+      padding: 10px 14px;
+      font-size: 0.98rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .record-btn {
+      background: var(--primary);
+      color: #fff;
+    }
+
+    .record-btn:hover:not(:disabled) {
+      background: var(--primary-dark);
+    }
+
+    .record-btn.recording {
+      background: var(--danger);
+    }
+
+    .pause-btn {
+      background: #f2f4f7;
+      color: var(--text);
+    }
+
+    .retry-btn {
+      background: #fff4ed;
+      color: var(--warning);
+      border: 1px solid #ffddb8;
+    }
+
+    .status {
+      margin-top: 11px;
+      min-height: 24px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .status.success {
+      color: var(--success);
+      font-weight: 700;
+    }
+
+    .status.error {
+      color: var(--danger);
+      font-weight: 700;
+    }
+
+    audio {
+      width: 100%;
+      margin-top: 12px;
+    }
+
+    .finish-bar {
+      position: sticky;
+      bottom: 14px;
+      background: rgba(255, 255, 255, 0.97);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .finish-btn {
+      background: var(--success);
+      color: #fff;
+      padding: 12px 18px;
+      white-space: nowrap;
+    }
+
+    .finish-summary {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .done {
+      display: none;
+      background: var(--success-bg);
+      color: var(--success);
+      border: 1px solid #abefc6;
+      border-radius: 14px;
+      padding: 24px;
+      text-align: center;
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+
+    @media (max-width: 650px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .finish-bar { align-items: stretch; flex-direction: column; }
+      .finish-btn { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <section class="hero">
+      <h1>Voice Questionnaire</h1>
+      <p>
+        Record an answer for any question that applies to you. Each answer is
+        uploaded as soon as you stop recording.
+      </p>
+    </section>
+
+    <section class="respondent-card">
+      <div class="form-grid">
+        <div>
+          <label for="respondentName">Your name</label>
+          <input
+            id="respondentName"
+            type="text"
+            autocomplete="name"
+            placeholder="Enter your name"
+          >
+        </div>
+        <div>
+          <label for="accessCode">Access code</label>
+          <input
+            id="accessCode"
+            type="password"
+            autocomplete="off"
+            placeholder="Enter the questionnaire access code"
+          >
+        </div>
+      </div>
+
+      <div class="privacy-note">
+        Your browser will ask for microphone permission the first time you record.
+        Please do not include patient-identifying information in your recording.
+      </div>
+    </section>
+
+    <div id="questionsContainer"></div>
+
+    <section id="doneMessage" class="done">
+      Thank you. Your recorded answers have been saved.
+    </section>
+
+    <div id="finishBar" class="finish-bar">
+      <div id="finishSummary" class="finish-summary">
+        0 answers saved
+      </div>
+      <button id="finishBtn" class="finish-btn" type="button">
+        Save and Exit
+      </button>
+    </div>
+  </main>
+
+  <script src="questions.js"></script>
+  <script>
+    // IMPORTANT: paste your deployed Google Apps Script /exec URL here.
+    const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbxc7-ANU7tT1Oq7ki3kA6IrC5BeiveVT0P9iQDIr9J5z7sFnxei0LH4bFJpmRbcQhj4/exec';
+
+    const questions = Array.isArray(window.QUESTIONS) ? window.QUESTIONS : [];
+    const sessionId = createSessionId();
+    const states = {};
+    const pendingRequests = new Map();
+
+    let lockedRespondentName = '';
+
+    function createSessionId() {
+      if (window.crypto && crypto.randomUUID) {
+        return crypto.randomUUID().replace(/-/g, '_');
+      }
+
+      return (
+        Date.now().toString(36) + '_' +
+        Math.random().toString(36).slice(2) + '_' +
+        Math.random().toString(36).slice(2)
+      );
+    }
+
+    function chooseMimeType() {
+      const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus'
+      ];
+
+      for (const type of candidates) {
+        if (window.MediaRecorder &&
+            MediaRecorder.isTypeSupported &&
+            MediaRecorder.isTypeSupported(type)) {
+          return type;
+        }
+      }
+
+      return '';
+    }
+
+    function extensionForMime(mimeType) {
+      const base = String(mimeType || '').split(';')[0].toLowerCase();
+      if (base === 'audio/mp4') return 'm4a';
+      if (base === 'audio/ogg') return 'ogg';
+      if (base === 'audio/wav') return 'wav';
+      if (base === 'audio/mpeg') return 'mp3';
+      return 'webm';
+    }
+
+    function renderQuestions() {
+      const container = document.getElementById('questionsContainer');
+
+      if (!questions.length) {
+        container.innerHTML = `
+          <section class="card">
+            <p class="status error">
+              No questions are configured. Edit questions.js first.
+            </p>
+          </section>
+        `;
+        return;
+      }
+
+      container.innerHTML = questions.map((q, i) => `
+        <section class="card" id="card-${i}">
+          <div class="question-number">Question ${i + 1}</div>
+          <div class="question-text"></div>
+
+          <div class="controls">
+            <button class="record-btn" id="record-${i}" type="button">
+              Record Answer
+            </button>
+
+            <button
+              class="pause-btn"
+              id="pause-${i}"
+              type="button"
+              style="display:none"
+            >
+              Pause
+            </button>
+
+            <button
+              class="retry-btn"
+              id="retry-${i}"
+              type="button"
+              style="display:none"
+            >
+              Retry Upload
+            </button>
+          </div>
+
+          <div class="status" id="status-${i}"></div>
+          <audio id="audio-${i}" controls style="display:none"></audio>
+        </section>
+      `).join('');
+
+      questions.forEach((q, i) => {
+        document.querySelector(`#card-${i} .question-text`).textContent = q;
+
+        states[i] = {
+          recorder: null,
+          stream: null,
+          chunks: [],
+          blob: null,
+          uploaded: false,
+          uploading: false,
+          uploadPromise: null
+        };
+
+        document
+          .getElementById(`record-${i}`)
+          .addEventListener('click', () => toggleRecording(i));
+
+        document
+          .getElementById(`pause-${i}`)
+          .addEventListener('click', () => togglePause(i));
+
+        document
+          .getElementById(`retry-${i}`)
+          .addEventListener('click', () => uploadRecording(i));
+      });
+    }
+
+    function getIdentity() {
+      const nameInput = document.getElementById('respondentName');
+      const codeInput = document.getElementById('accessCode');
+
+      const respondentName = nameInput.value.trim();
+      const accessCode = codeInput.value;
+
+      if (!respondentName) {
+        alert('Please enter your name first.');
+        nameInput.focus();
+        return null;
+      }
+
+      if (!accessCode) {
+        alert('Please enter the access code first.');
+        codeInput.focus();
+        return null;
+      }
+
+      if (lockedRespondentName && respondentName !== lockedRespondentName) {
+        alert(
+          'The respondent name cannot be changed after the first answer is uploaded.'
+        );
+        nameInput.value = lockedRespondentName;
+        return null;
+      }
+
+      return { respondentName, accessCode };
+    }
+
+    async function toggleRecording(index) {
+      const identity = getIdentity();
+      if (!identity) return;
+
+      const state = states[index];
+      const recordBtn = document.getElementById(`record-${index}`);
+      const pauseBtn = document.getElementById(`pause-${index}`);
+      const retryBtn = document.getElementById(`retry-${index}`);
+      const status = document.getElementById(`status-${index}`);
+      const audio = document.getElementById(`audio-${index}`);
+
+      if (state.recorder && state.recorder.state !== 'inactive') {
+        state.recorder.stop();
+        return;
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setStatus(index, 'Microphone recording is not supported in this browser.', 'error');
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mimeType = chooseMimeType();
+
+        const options = {};
+        if (mimeType) options.mimeType = mimeType;
+        options.audioBitsPerSecond = 64000;
+
+        let recorder;
+        try {
+          recorder = new MediaRecorder(stream, options);
+        } catch (err) {
+          // Some browsers reject audioBitsPerSecond or mimeType combinations.
+          recorder = new MediaRecorder(stream);
+        }
+
+        state.stream = stream;
+        state.recorder = recorder;
+        state.chunks = [];
+        state.uploaded = false;
+        retryBtn.style.display = 'none';
+
+        recorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0) {
+            state.chunks.push(event.data);
+          }
+        };
+
+        recorder.onstop = async () => {
+          const actualMime =
+            recorder.mimeType ||
+            mimeType ||
+            (state.chunks[0] && state.chunks[0].type) ||
+            'audio/webm';
+
+          const blob = new Blob(state.chunks, { type: actualMime });
+          state.blob = blob;
+
+          if (state.stream) {
+            state.stream.getTracks().forEach(track => track.stop());
+          }
+
+          const url = URL.createObjectURL(blob);
+          audio.src = url;
+          audio.style.display = 'block';
+
+          recordBtn.textContent = 'Record Again';
+          recordBtn.classList.remove('recording');
+          pauseBtn.style.display = 'none';
+          pauseBtn.textContent = 'Pause';
+
+          setStatus(index, 'Recording complete. Uploading now…', '');
+          await uploadRecording(index);
+        };
+
+        recorder.onerror = (event) => {
+          console.error('MediaRecorder error:', event);
+          setStatus(index, 'Recording failed. Please try again.', 'error');
+        };
+
+        recorder.start(1000);
+
+        recordBtn.textContent = 'Stop Recording';
+        recordBtn.classList.add('recording');
+        pauseBtn.style.display = 'inline-block';
+        audio.style.display = 'none';
+
+        setStatus(index, 'Recording…', '');
+      } catch (err) {
+        console.error(err);
+        setStatus(
+          index,
+          'Could not access the microphone. Check browser permission and try again.',
+          'error'
+        );
+      }
+    }
+
+    function togglePause(index) {
+      const state = states[index];
+      const pauseBtn = document.getElementById(`pause-${index}`);
+
+      if (!state.recorder) return;
+
+      if (state.recorder.state === 'recording') {
+        state.recorder.pause();
+        pauseBtn.textContent = 'Resume';
+        setStatus(index, 'Recording paused.', '');
+      } else if (state.recorder.state === 'paused') {
+        state.recorder.resume();
+        pauseBtn.textContent = 'Pause';
+        setStatus(index, 'Recording resumed…', '');
+      }
+    }
+
+    async function uploadRecording(index) {
+      const identity = getIdentity();
+      if (!identity) return;
+
+      const state = states[index];
+      const retryBtn = document.getElementById(`retry-${index}`);
+
+      if (!state.blob) {
+        setStatus(index, 'There is no recording to upload yet.', 'error');
+        return;
+      }
+
+      if (state.uploading) return state.uploadPromise;
+
+      state.uploading = true;
+      state.uploaded = false;
+      retryBtn.style.display = 'none';
+      setStatus(index, 'Uploading answer…', '');
+
+      const promise = (async () => {
+        try {
+          const base64 = await blobToBase64(state.blob);
+
+          const result = await submitToBackend({
+            action: 'upload',
+            accessCode: identity.accessCode,
+            respondentName: identity.respondentName,
+            sessionId: sessionId,
+            questionNumber: String(index + 1),
+            mimeType: state.blob.type || 'audio/webm',
+            audioBase64: base64
+          });
+
+          if (!result.ok) {
+            throw new Error(result.error || 'Upload failed.');
+          }
+
+          state.uploaded = true;
+          lockedRespondentName = identity.respondentName;
+          document.getElementById('respondentName').disabled = true;
+
+          setStatus(index, 'Saved successfully.', 'success');
+          updateFinishSummary();
+        } catch (err) {
+          console.error(err);
+          state.uploaded = false;
+          retryBtn.style.display = 'inline-block';
+          setStatus(
+            index,
+            'Upload failed. Your recording is still on this page. Press Retry Upload.',
+            'error'
+          );
+        } finally {
+          state.uploading = false;
+          state.uploadPromise = null;
+        }
+      })();
+
+      state.uploadPromise = promise;
+      return promise;
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onloadend = () => {
+          const result = String(reader.result || '');
+          const comma = result.indexOf(',');
+          resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    function submitToBackend(fields) {
+      return new Promise((resolve, reject) => {
+        if (!BACKEND_URL ||
+            BACKEND_URL.includes('PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE')) {
+          reject(new Error('BACKEND_URL is not configured in index.html.'));
+          return;
+        }
+
+        const requestId = createSessionId();
+        const frameName = `upload_frame_${requestId}`;
+
+        const iframe = document.createElement('iframe');
+        iframe.name = frameName;
+        iframe.style.display = 'none';
+        document.body.appendChild(iframe);
+
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = BACKEND_URL;
+        form.target = frameName;
+        form.style.display = 'none';
+
+        const payload = { ...fields, requestId };
+
+        Object.entries(payload).forEach(([key, value]) => {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = key;
+          input.value = value == null ? '' : String(value);
+          form.appendChild(input);
+        });
+
+        document.body.appendChild(form);
+
+        const timer = setTimeout(() => {
+          pendingRequests.delete(requestId);
+          form.remove();
+          iframe.remove();
+          reject(new Error('The server did not confirm the upload in time.'));
+        }, 90000);
+
+        pendingRequests.set(requestId, {
+          resolve: (message) => {
+            clearTimeout(timer);
+            form.remove();
+            iframe.remove();
+            resolve(message);
+          }
+        });
+
+        form.submit();
+      });
+    }
+
+    window.addEventListener('message', (event) => {
+      const data = event.data;
+
+      if (!data || typeof data !== 'object' || !data.requestId) {
+        return;
+      }
+
+      const pending = pendingRequests.get(data.requestId);
+      if (!pending) return;
+
+      pendingRequests.delete(data.requestId);
+      pending.resolve(data);
+    });
+
+    function setStatus(index, text, kind) {
+      const el = document.getElementById(`status-${index}`);
+      el.textContent = text;
+      el.className = `status ${kind || ''}`;
+    }
+
+    function updateFinishSummary() {
+      const saved = Object.values(states).filter(s => s.uploaded).length;
+      document.getElementById('finishSummary').textContent =
+        `${saved} answer${saved === 1 ? '' : 's'} saved`;
+    }
+
+    async function finalizeQuestionnaire() {
+      const identity = getIdentity();
+      if (!identity) return;
+
+      const finishBtn = document.getElementById('finishBtn');
+      finishBtn.disabled = true;
+      finishBtn.textContent = 'Finishing…';
+
+      try {
+        const activeUploads = Object.values(states)
+          .map(s => s.uploadPromise)
+          .filter(Boolean);
+
+        if (activeUploads.length) {
+          await Promise.allSettled(activeUploads);
+        }
+
+        const answered = Object.entries(states)
+          .filter(([, s]) => s.uploaded)
+          .map(([i]) => Number(i) + 1);
+
+        if (!answered.length) {
+          alert('Please record and successfully upload at least one answer.');
+          return;
+        }
+
+        const result = await submitToBackend({
+          action: 'finalize',
+          accessCode: identity.accessCode,
+          respondentName: lockedRespondentName || identity.respondentName,
+          sessionId: sessionId,
+          answeredQuestions: answered.join(',')
+        });
+
+        if (!result.ok) {
+          throw new Error(result.error || 'Could not finalize.');
+        }
+
+        document.getElementById('questionsContainer').style.display = 'none';
+        document.querySelector('.respondent-card').style.display = 'none';
+        document.getElementById('finishBar').style.display = 'none';
+        document.getElementById('doneMessage').style.display = 'block';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } catch (err) {
+        console.error(err);
+        alert(
+          'Your already-saved recordings are safe, but the final completion step failed. ' +
+          'Please try Save and Exit again.'
+        );
+      } finally {
+        finishBtn.disabled = false;
+        finishBtn.textContent = 'Save and Exit';
+      }
+    }
+
+    document
+      .getElementById('finishBtn')
+      .addEventListener('click', finalizeQuestionnaire);
+
+    renderQuestions();
+    updateFinishSummary();
+  </script>
+</body>
+</html>
