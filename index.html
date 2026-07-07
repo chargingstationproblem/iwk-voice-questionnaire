@@ -219,6 +219,49 @@
       font-weight: 700;
     }
 
+
+    .verify-row {
+      margin-top: 14px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .verify-btn {
+      background: var(--primary);
+      color: #fff;
+      padding: 11px 16px;
+    }
+
+    .verify-btn:hover:not(:disabled) {
+      background: var(--primary-dark);
+    }
+
+    .access-status {
+      min-height: 24px;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+
+    .access-status.success {
+      color: var(--success);
+      font-weight: 700;
+    }
+
+    .access-status.error {
+      color: var(--danger);
+      font-weight: 700;
+    }
+
+    .locked-note {
+      display: none;
+      margin-top: 8px;
+      color: var(--success);
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+
     @media (max-width: 650px) {
       .form-grid { grid-template-columns: 1fr; }
       .finish-bar { align-items: stretch; flex-direction: column; }
@@ -231,8 +274,7 @@
     <section class="hero">
       <h1>Voice Questionnaire</h1>
       <p>
-        Record an answer for any question that applies to you. After you stop a recording,
-        it uploads quietly in the background while you continue.
+        First verify the access code. After verification, record any questions that apply to you. Each stopped recording uploads quietly in the background.
       </p>
     </section>
 
@@ -258,8 +300,22 @@
         </div>
       </div>
 
+      <div class="verify-row">
+        <button id="verifyBtn" class="verify-btn" type="button">
+          Verify Access Code
+        </button>
+        <div id="accessStatus" class="access-status">
+          Verify the access code before recording.
+        </div>
+      </div>
+
+      <div id="lockedNote" class="locked-note">
+        Access verified. Recording and saving are now enabled.
+      </div>
+
       <div class="privacy-note">
-        Your browser will ask for microphone permission the first time you record.
+        Recording is disabled until the access code is verified.
+        Your browser will ask for microphone permission only after successful verification.
         Please do not include patient-identifying information in your recording.
       </div>
     </section>
@@ -283,14 +339,16 @@
   <script src="questions.js"></script>
   <script>
     /*
-     * IWK Voice Questionnaire — Fast Background Upload version
+     * IWK Voice Questionnaire — Verified Access + Fast Background Upload
      *
-     * Speed improvements:
-     * - starts uploading immediately after Stop Recording
-     * - keeps at most 2 uploads active at once
-     * - records speech at 32 kbps instead of 64 kbps
-     * - Save and Exit waits only for unfinished uploads
-     * - final backend step verifies expected audio files exist in Drive
+     * Security/flow:
+     * 1. Record and Save buttons start disabled.
+     * 2. Respondent enters name + access code and clicks Verify Access Code.
+     * 3. Backend checks the real Script Property before enabling recording.
+     * 4. Backend returns a signed, time-limited session token.
+     * 5. Audio uploads use the session token; the raw access code is not reused.
+     * 6. Upload success/failure is confirmed by a signed request ID message
+     *    sent from Apps Script to the top questionnaire page.
      */
 
     const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbxc7-ANU7tT1Oq7ki3kA6IrC5BeiveVT0P9iQDIr9J5z7sFnxei0LH4bFJpmRbcQhj4/exec';
@@ -304,7 +362,10 @@
 
     const uploadQueue = [];
     let activeUploadCount = 0;
-    let lockedRespondentName = '';
+
+    let accessVerified = false;
+    let verifiedRespondentName = '';
+    let sessionToken = '';
 
     function createSessionId() {
       if (window.crypto && crypto.randomUUID) {
@@ -320,6 +381,10 @@
 
     function delay(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function questionnaireOrigin() {
+      return window.location.origin;
     }
 
     function chooseMimeType() {
@@ -363,7 +428,12 @@
           <div class="question-text"></div>
 
           <div class="controls">
-            <button class="record-btn" id="record-${i}" type="button">
+            <button
+              class="record-btn"
+              id="record-${i}"
+              type="button"
+              disabled
+            >
               Record Answer
             </button>
 
@@ -377,7 +447,9 @@
             </button>
           </div>
 
-          <div class="status" id="status-${i}"></div>
+          <div class="status" id="status-${i}">
+            Verify the access code to enable recording.
+          </div>
           <audio id="audio-${i}" controls style="display:none"></audio>
         </section>
       `).join('');
@@ -414,7 +486,34 @@
       });
     }
 
-    function getIdentity() {
+    function setRecordingEnabled(enabled) {
+      Object.keys(states).forEach(index => {
+        const btn = document.getElementById(`record-${index}`);
+        if (btn) btn.disabled = !enabled;
+
+        const status = document.getElementById(`status-${index}`);
+        if (
+          status &&
+          !states[index].blob &&
+          (!states[index].recorder || states[index].recorder.state === 'inactive')
+        ) {
+          status.textContent = enabled
+            ? 'Ready to record.'
+            : 'Verify the access code to enable recording.';
+          status.className = 'status';
+        }
+      });
+
+      document.getElementById('finishBtn').disabled = !enabled;
+    }
+
+    function setAccessStatus(text, kind = '') {
+      const el = document.getElementById('accessStatus');
+      el.textContent = text;
+      el.className = `access-status ${kind}`;
+    }
+
+    function getUnverifiedCredentials() {
       const nameInput = document.getElementById('respondentName');
       const codeInput = document.getElementById('accessCode');
 
@@ -422,37 +521,105 @@
       const accessCode = codeInput.value;
 
       if (!respondentName) {
-        alert('Please enter your name first.');
+        setAccessStatus('Please enter your name.', 'error');
         nameInput.focus();
         return null;
       }
 
       if (!accessCode) {
-        alert('Please enter the access code first.');
+        setAccessStatus('Please enter the access code.', 'error');
         codeInput.focus();
-        return null;
-      }
-
-      if (lockedRespondentName && respondentName !== lockedRespondentName) {
-        alert(
-          'The respondent name cannot be changed after background uploading starts.'
-        );
-        nameInput.value = lockedRespondentName;
         return null;
       }
 
       return { respondentName, accessCode };
     }
 
-    function lockIdentity(identity) {
-      if (!lockedRespondentName) {
-        lockedRespondentName = identity.respondentName;
-        document.getElementById('respondentName').disabled = true;
+    function getVerifiedIdentity() {
+      if (!accessVerified || !verifiedRespondentName || !sessionToken) {
+        alert('Please verify the access code before recording or saving.');
+        return null;
+      }
+
+      return {
+        respondentName: verifiedRespondentName,
+        sessionToken: sessionToken
+      };
+    }
+
+    async function verifyAccessCode() {
+      if (accessVerified) return;
+
+      const credentials = getUnverifiedCredentials();
+      if (!credentials) return;
+
+      const verifyBtn = document.getElementById('verifyBtn');
+      verifyBtn.disabled = true;
+      verifyBtn.textContent = 'Checking…';
+      setAccessStatus('Checking the access code…', '');
+
+      try {
+        const result = await submitBackendAndReadResult({
+          action: 'validate',
+          accessCode: credentials.accessCode,
+          respondentName: credentials.respondentName,
+          sessionId: sessionId
+        }, 30000);
+
+        if (!result.ok) {
+          throw new Error(result.error || 'Incorrect access code.');
+        }
+
+        if (!result.sessionToken) {
+          throw new Error('The server did not return a valid session token.');
+        }
+
+        accessVerified = true;
+        verifiedRespondentName = credentials.respondentName;
+        sessionToken = result.sessionToken;
+
+        const nameInput = document.getElementById('respondentName');
+        const codeInput = document.getElementById('accessCode');
+
+        nameInput.disabled = true;
+        codeInput.value = '';
+        codeInput.disabled = true;
+
+        verifyBtn.textContent = 'Access Verified';
+        verifyBtn.disabled = true;
+
+        setAccessStatus('Access code verified successfully.', 'success');
+        document.getElementById('lockedNote').style.display = 'block';
+
+        setRecordingEnabled(true);
+        updateFinishSummary();
+      } catch (err) {
+        console.error(err);
+
+        accessVerified = false;
+        verifiedRespondentName = '';
+        sessionToken = '';
+
+        setRecordingEnabled(false);
+
+        setAccessStatus(
+          err && err.message
+            ? err.message
+            : 'Incorrect access code. Recording remains disabled.',
+          'error'
+        );
+
+        const codeInput = document.getElementById('accessCode');
+        codeInput.value = '';
+        codeInput.focus();
+
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = 'Verify Access Code';
       }
     }
 
     async function toggleRecording(index) {
-      const identity = getIdentity();
+      const identity = getVerifiedIdentity();
       if (!identity) return;
 
       const state = states[index];
@@ -487,10 +654,10 @@
         }
 
         let recorder;
+
         try {
           recorder = new MediaRecorder(stream, options);
         } catch (err) {
-          // Browser fallback if a MIME/bitrate combination is rejected.
           recorder = new MediaRecorder(stream);
         }
 
@@ -501,7 +668,7 @@
           state.stopResolve = resolve;
         });
 
-        recorder.ondataavailable = (event) => {
+        recorder.ondataavailable = event => {
           if (event.data && event.data.size > 0) {
             state.chunks.push(event.data);
           }
@@ -542,12 +709,11 @@
             state.stopResolve = null;
           }
 
-          lockIdentity(identity);
           scheduleLatestUpload(index, identity);
           updateFinishSummary();
         };
 
-        recorder.onerror = (event) => {
+        recorder.onerror = event => {
           console.error('MediaRecorder error:', event);
 
           if (state.stream) {
@@ -640,16 +806,10 @@
 
       state.queuedRevision = revision;
 
-      /*
-       * Serialize uploads for the same question so that a re-recording can
-       * never be overwritten later by an older upload finishing out of order.
-       */
       const scheduled = state.uploadChain
         .catch(() => undefined)
         .then(() =>
           enqueueUploadTask(async () => {
-            // If a newer re-recording exists and this job has not started yet,
-            // skip the stale revision to save bandwidth.
             if (state.revision !== revision) {
               return { skipped: true, revision };
             }
@@ -677,6 +837,7 @@
             state.lastUploadError = null;
             setStatus(index, 'Saved in the background.', 'success');
           }
+
           updateFinishSummary();
           return result;
         })
@@ -685,10 +846,11 @@
             state.lastUploadError = err;
             setStatus(
               index,
-              'Background upload paused. Save and Exit will retry it.',
+              'Background upload failed. Save and Exit will retry it.',
               'error'
             );
           }
+
           updateFinishSummary();
           throw err;
         });
@@ -709,16 +871,20 @@
         try {
           const audioBase64 = await blobToBase64(blob);
 
-          await submitUploadAndWait({
+          const result = await submitBackendAndReadResult({
             action: 'upload',
-            accessCode: identity.accessCode,
+            sessionToken: identity.sessionToken,
             respondentName: identity.respondentName,
             sessionId: sessionId,
             questionNumber: String(index + 1),
             revision: String(revision),
             mimeType: blob.type || 'audio/webm',
             audioBase64: audioBase64
-          });
+          }, 120000);
+
+          if (!result.ok) {
+            throw new Error(result.error || 'Upload failed.');
+          }
 
           return;
         } catch (err) {
@@ -745,6 +911,7 @@
           if (state.stopPromise) {
             waits.push(state.stopPromise);
           }
+
           state.recorder.stop();
         }
       }
@@ -770,12 +937,16 @@
     }
 
     /*
-     * Cross-origin-compatible upload:
-     * - submits to Apps Script through a hidden iframe
-     * - waits for the Apps Script response page to finish loading
-     * - final Save and Exit performs authoritative Drive verification
+     * Reliable cross-origin POST confirmation:
+     *
+     * 1. POST targets a hidden iframe.
+     * 2. Apps Script processes the request.
+     * 3. Apps Script sends the real result to window.top via postMessage.
+     * 4. This page matches the random requestId before accepting the result.
+     *
+     * This prevents an error response from being mistaken for a successful upload.
      */
-    function submitUploadAndWait(fields) {
+    function submitBackendAndReadResult(fields, timeoutMs) {
       return new Promise((resolve, reject) => {
         if (
           !BACKEND_URL ||
@@ -786,7 +957,7 @@
         }
 
         const requestId = createSessionId();
-        const frameName = `upload_frame_${requestId}`;
+        const frameName = `backend_frame_${requestId}`;
 
         const iframe = document.createElement('iframe');
         iframe.name = frameName;
@@ -798,7 +969,11 @@
         form.target = frameName;
         form.style.display = 'none';
 
-        const payload = { ...fields, requestId };
+        const payload = {
+          ...fields,
+          requestId: requestId,
+          questionnaireOrigin: questionnaireOrigin()
+        };
 
         Object.entries(payload).forEach(([key, value]) => {
           const input = document.createElement('input');
@@ -811,10 +986,10 @@
         document.body.appendChild(iframe);
         document.body.appendChild(form);
 
-        let submitted = false;
         let finished = false;
 
         const cleanup = () => {
+          window.removeEventListener('message', onMessage);
           form.remove();
           iframe.remove();
         };
@@ -823,25 +998,26 @@
           if (finished) return;
           finished = true;
           cleanup();
-          reject(new Error('Upload timed out.'));
-        }, 120000);
+          reject(new Error('The server did not confirm the request in time.'));
+        }, timeoutMs);
 
-        iframe.onload = () => {
+        const onMessage = event => {
           if (finished) return;
 
-          if (!submitted) {
-            submitted = true;
-            form.submit();
-            return;
-          }
+          const data = event.data;
+
+          if (!data || typeof data !== 'object') return;
+          if (data.requestId !== requestId) return;
 
           finished = true;
           clearTimeout(timer);
           cleanup();
-          resolve();
+
+          resolve(data);
         };
 
-        iframe.src = 'about:blank';
+        window.addEventListener('message', onMessage);
+        form.submit();
       });
     }
 
@@ -898,6 +1074,11 @@
         return;
       }
 
+      if (!accessVerified) {
+        summary.textContent = 'Verify access code before recording or saving';
+        return;
+      }
+
       const recorded = getRecordedEntries().length;
       const uploaded = countFullyUploadedLatestRevisions();
       const busy = activeUploadCount + uploadQueue.length;
@@ -915,13 +1096,14 @@
 
       summary.textContent =
         `${recorded} recorded · ${uploaded} saved in background` +
-        (busy > 0 ? ` · ${busy} upload${busy === 1 ? '' : 's'} in progress` : '');
+        (busy > 0
+          ? ` · ${busy} upload${busy === 1 ? '' : 's'} in progress`
+          : '');
     }
 
     async function ensureLatestUploads(identity) {
       const recordedEntries = getRecordedEntries();
 
-      // Schedule anything that has not yet been queued.
       for (const [indexText] of recordedEntries) {
         scheduleLatestUpload(Number(indexText), identity);
       }
@@ -934,7 +1116,6 @@
         await Promise.allSettled(promises);
       }
 
-      // Retry only the latest revisions that are still not uploaded.
       const retryPromises = [];
 
       for (const [indexText, state] of recordedEntries) {
@@ -953,7 +1134,7 @@
     }
 
     async function finalizeQuestionnaire() {
-      const identity = getIdentity();
+      const identity = getVerifiedIdentity();
       if (!identity) return;
 
       const finishBtn = document.getElementById('finishBtn');
@@ -961,10 +1142,6 @@
       finishBtn.textContent = 'Saving…';
 
       try {
-        /*
-         * If Save and Exit is clicked while recording, stop first.
-         * onstop immediately schedules that final answer for background upload.
-         */
         await stopActiveRecordings();
 
         const recordedEntries = getRecordedEntries();
@@ -976,8 +1153,6 @@
           updateFinishSummary();
           return;
         }
-
-        lockIdentity(identity);
 
         updateFinishSummary('Finishing any remaining uploads…');
         await ensureLatestUploads(identity);
@@ -1000,24 +1175,20 @@
         updateFinishSummary('All uploads complete. Verifying saved files…');
         finishBtn.textContent = 'Finishing…';
 
-        /*
-         * Navigate to the backend completion endpoint.
-         * The backend verifies the expected Qxx files exist in Drive.
-         * Only then does it show the thank-you page.
-         */
         submitCompletionPage({
           action: 'complete',
-          accessCode: identity.accessCode,
-          respondentName: lockedRespondentName || identity.respondentName,
+          sessionToken: identity.sessionToken,
+          respondentName: identity.respondentName,
           sessionId: sessionId,
           answeredQuestions: answeredNumbers.join(',')
         });
-
       } catch (err) {
         console.error(err);
 
         alert(
-          'Some recordings could not be saved yet. Please keep this page open and click Save and Exit again.'
+          err && err.message
+            ? err.message
+            : 'Some recordings could not be saved yet. Please try Save and Exit again.'
         );
 
         finishBtn.disabled = false;
@@ -1027,10 +1198,24 @@
     }
 
     document
+      .getElementById('verifyBtn')
+      .addEventListener('click', verifyAccessCode);
+
+    document
+      .getElementById('accessCode')
+      .addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          verifyAccessCode();
+        }
+      });
+
+    document
       .getElementById('finishBtn')
       .addEventListener('click', finalizeQuestionnaire);
 
     renderQuestions();
+    setRecordingEnabled(false);
     updateFinishSummary();
   </script>
 </body>
