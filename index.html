@@ -231,8 +231,8 @@
     <section class="hero">
       <h1>Voice Questionnaire</h1>
       <p>
-        Record an answer for any question that applies to you. Each answer is
-        uploaded as soon as you stop recording.
+        Record an answer for any question that applies to you. Your recordings stay
+        on this page until you click Save and Exit.
       </p>
     </section>
 
@@ -267,12 +267,12 @@
     <div id="questionsContainer"></div>
 
     <section id="doneMessage" class="done">
-      Thank you. Your recorded answers have been saved.
+      Your answers were saved successfully. Thank you.
     </section>
 
     <div id="finishBar" class="finish-bar">
       <div id="finishSummary" class="finish-summary">
-        0 answers saved
+        0 answers ready to save
       </div>
       <button id="finishBtn" class="finish-btn" type="button">
         Save and Exit
@@ -282,15 +282,14 @@
 
   <script src="questions.js"></script>
   <script>
-    // IMPORTANT: paste your deployed Google Apps Script /exec URL here.
-    const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbxc7-ANU7tT1Oq7ki3kA6IrC5BeiveVT0P9iQDIr9J5z7sFnxei0LH4bFJpmRbcQhj4/exec';
+    // IMPORTANT:
+    // Keep your existing deployed Google Apps Script URL here.
+    // It must end with /exec.
+    const BACKEND_URL = 'PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE';
 
     const questions = Array.isArray(window.QUESTIONS) ? window.QUESTIONS : [];
     const sessionId = createSessionId();
     const states = {};
-    const pendingRequests = new Map();
-
-    let lockedRespondentName = '';
 
     function createSessionId() {
       if (window.crypto && crypto.randomUUID) {
@@ -313,23 +312,16 @@
       ];
 
       for (const type of candidates) {
-        if (window.MediaRecorder &&
-            MediaRecorder.isTypeSupported &&
-            MediaRecorder.isTypeSupported(type)) {
+        if (
+          window.MediaRecorder &&
+          MediaRecorder.isTypeSupported &&
+          MediaRecorder.isTypeSupported(type)
+        ) {
           return type;
         }
       }
 
       return '';
-    }
-
-    function extensionForMime(mimeType) {
-      const base = String(mimeType || '').split(';')[0].toLowerCase();
-      if (base === 'audio/mp4') return 'm4a';
-      if (base === 'audio/ogg') return 'ogg';
-      if (base === 'audio/wav') return 'wav';
-      if (base === 'audio/mpeg') return 'mp3';
-      return 'webm';
     }
 
     function renderQuestions() {
@@ -339,7 +331,7 @@
         container.innerHTML = `
           <section class="card">
             <p class="status error">
-              No questions are configured. Edit questions.js first.
+              No questions are configured. Check questions.js.
             </p>
           </section>
         `;
@@ -364,15 +356,6 @@
             >
               Pause
             </button>
-
-            <button
-              class="retry-btn"
-              id="retry-${i}"
-              type="button"
-              style="display:none"
-            >
-              Retry Upload
-            </button>
           </div>
 
           <div class="status" id="status-${i}"></div>
@@ -388,9 +371,10 @@
           stream: null,
           chunks: [],
           blob: null,
-          uploaded: false,
-          uploading: false,
-          uploadPromise: null
+          objectUrl: null,
+          stopPromise: null,
+          stopResolve: null,
+          saved: false
         };
 
         document
@@ -400,10 +384,6 @@
         document
           .getElementById(`pause-${i}`)
           .addEventListener('click', () => togglePause(i));
-
-        document
-          .getElementById(`retry-${i}`)
-          .addEventListener('click', () => uploadRecording(i));
       });
     }
 
@@ -426,14 +406,6 @@
         return null;
       }
 
-      if (lockedRespondentName && respondentName !== lockedRespondentName) {
-        alert(
-          'The respondent name cannot be changed after the first answer is uploaded.'
-        );
-        nameInput.value = lockedRespondentName;
-        return null;
-      }
-
       return { respondentName, accessCode };
     }
 
@@ -444,8 +416,6 @@
       const state = states[index];
       const recordBtn = document.getElementById(`record-${index}`);
       const pauseBtn = document.getElementById(`pause-${index}`);
-      const retryBtn = document.getElementById(`retry-${index}`);
-      const status = document.getElementById(`status-${index}`);
       const audio = document.getElementById(`audio-${index}`);
 
       if (state.recorder && state.recorder.state !== 'inactive') {
@@ -454,31 +424,38 @@
       }
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setStatus(index, 'Microphone recording is not supported in this browser.', 'error');
+        setStatus(
+          index,
+          'Microphone recording is not supported in this browser.',
+          'error'
+        );
         return;
       }
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const mimeType = chooseMimeType();
+        const preferredMimeType = chooseMimeType();
 
-        const options = {};
-        if (mimeType) options.mimeType = mimeType;
-        options.audioBitsPerSecond = 64000;
+        const options = { audioBitsPerSecond: 64000 };
+        if (preferredMimeType) {
+          options.mimeType = preferredMimeType;
+        }
 
         let recorder;
         try {
           recorder = new MediaRecorder(stream, options);
         } catch (err) {
-          // Some browsers reject audioBitsPerSecond or mimeType combinations.
           recorder = new MediaRecorder(stream);
         }
 
         state.stream = stream;
         state.recorder = recorder;
         state.chunks = [];
-        state.uploaded = false;
-        retryBtn.style.display = 'none';
+        state.saved = false;
+
+        state.stopPromise = new Promise((resolve) => {
+          state.stopResolve = resolve;
+        });
 
         recorder.ondataavailable = (event) => {
           if (event.data && event.data.size > 0) {
@@ -486,22 +463,25 @@
           }
         };
 
-        recorder.onstop = async () => {
+        recorder.onstop = () => {
           const actualMime =
             recorder.mimeType ||
-            mimeType ||
+            preferredMimeType ||
             (state.chunks[0] && state.chunks[0].type) ||
             'audio/webm';
 
-          const blob = new Blob(state.chunks, { type: actualMime });
-          state.blob = blob;
+          state.blob = new Blob(state.chunks, { type: actualMime });
 
           if (state.stream) {
             state.stream.getTracks().forEach(track => track.stop());
           }
 
-          const url = URL.createObjectURL(blob);
-          audio.src = url;
+          if (state.objectUrl) {
+            URL.revokeObjectURL(state.objectUrl);
+          }
+
+          state.objectUrl = URL.createObjectURL(state.blob);
+          audio.src = state.objectUrl;
           audio.style.display = 'block';
 
           recordBtn.textContent = 'Record Again';
@@ -509,13 +489,33 @@
           pauseBtn.style.display = 'none';
           pauseBtn.textContent = 'Pause';
 
-          setStatus(index, 'Recording complete. Uploading now…', '');
-          await uploadRecording(index);
+          setStatus(
+            index,
+            'Recorded. It will be saved when you click Save and Exit.',
+            'success'
+          );
+
+          if (state.stopResolve) {
+            state.stopResolve();
+            state.stopResolve = null;
+          }
+
+          updateFinishSummary();
         };
 
         recorder.onerror = (event) => {
           console.error('MediaRecorder error:', event);
+
+          if (state.stream) {
+            state.stream.getTracks().forEach(track => track.stop());
+          }
+
           setStatus(index, 'Recording failed. Please try again.', 'error');
+
+          if (state.stopResolve) {
+            state.stopResolve();
+            state.stopResolve = null;
+          }
         };
 
         recorder.start(1000);
@@ -553,66 +553,19 @@
       }
     }
 
-    async function uploadRecording(index) {
-      const identity = getIdentity();
-      if (!identity) return;
+    async function stopActiveRecordings() {
+      const waits = [];
 
-      const state = states[index];
-      const retryBtn = document.getElementById(`retry-${index}`);
-
-      if (!state.blob) {
-        setStatus(index, 'There is no recording to upload yet.', 'error');
-        return;
+      for (const state of Object.values(states)) {
+        if (state.recorder && state.recorder.state !== 'inactive') {
+          if (state.stopPromise) waits.push(state.stopPromise);
+          state.recorder.stop();
+        }
       }
 
-      if (state.uploading) return state.uploadPromise;
-
-      state.uploading = true;
-      state.uploaded = false;
-      retryBtn.style.display = 'none';
-      setStatus(index, 'Uploading answer…', '');
-
-      const promise = (async () => {
-        try {
-          const base64 = await blobToBase64(state.blob);
-
-          const result = await submitToBackend({
-            action: 'upload',
-            accessCode: identity.accessCode,
-            respondentName: identity.respondentName,
-            sessionId: sessionId,
-            questionNumber: String(index + 1),
-            mimeType: state.blob.type || 'audio/webm',
-            audioBase64: base64
-          });
-
-          if (!result.ok) {
-            throw new Error(result.error || 'Upload failed.');
-          }
-
-          state.uploaded = true;
-          lockedRespondentName = identity.respondentName;
-          document.getElementById('respondentName').disabled = true;
-
-          setStatus(index, 'Saved successfully.', 'success');
-          updateFinishSummary();
-        } catch (err) {
-          console.error(err);
-          state.uploaded = false;
-          retryBtn.style.display = 'inline-block';
-          setStatus(
-            index,
-            'Upload failed. Your recording is still on this page. Press Retry Upload.',
-            'error'
-          );
-        } finally {
-          state.uploading = false;
-          state.uploadPromise = null;
-        }
-      })();
-
-      state.uploadPromise = promise;
-      return promise;
+      if (waits.length) {
+        await Promise.allSettled(waits);
+      }
     }
 
     function blobToBase64(blob) {
@@ -630,21 +583,28 @@
       });
     }
 
-    function submitToBackend(fields) {
+    /*
+     * Cross-origin-safe uploader:
+     * - submits each recording through a hidden iframe
+     * - waits for the iframe's second load event
+     * - does NOT depend on postMessage callbacks
+     */
+    function submitUploadAndWait(fields) {
       return new Promise((resolve, reject) => {
-        if (!BACKEND_URL ||
-            BACKEND_URL.includes('PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE')) {
+        if (
+          !BACKEND_URL ||
+          BACKEND_URL.includes('PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE')
+        ) {
           reject(new Error('BACKEND_URL is not configured in index.html.'));
           return;
         }
 
         const requestId = createSessionId();
-        const frameName = `upload_frame_${requestId}`;
+        const frameName = `save_frame_${requestId}`;
 
         const iframe = document.createElement('iframe');
         iframe.name = frameName;
         iframe.style.display = 'none';
-        document.body.appendChild(iframe);
 
         const form = document.createElement('form');
         form.method = 'POST';
@@ -662,41 +622,71 @@
           form.appendChild(input);
         });
 
+        document.body.appendChild(iframe);
         document.body.appendChild(form);
 
-        const timer = setTimeout(() => {
-          pendingRequests.delete(requestId);
+        let submitted = false;
+        let finished = false;
+
+        const cleanup = () => {
           form.remove();
           iframe.remove();
-          reject(new Error('The server did not confirm the upload in time.'));
-        }, 90000);
+        };
 
-        pendingRequests.set(requestId, {
-          resolve: (message) => {
-            clearTimeout(timer);
-            form.remove();
-            iframe.remove();
-            resolve(message);
+        const timer = setTimeout(() => {
+          if (finished) return;
+          finished = true;
+          cleanup();
+          reject(new Error('Saving timed out. Please try again.'));
+        }, 120000);
+
+        iframe.onload = () => {
+          if (finished) return;
+
+          // First load is the initial blank iframe.
+          if (!submitted) {
+            submitted = true;
+            form.submit();
+            return;
           }
-        });
 
-        form.submit();
+          // Second load is the Apps Script response.
+          finished = true;
+          clearTimeout(timer);
+          cleanup();
+          resolve();
+        };
+
+        // Force a predictable first load event.
+        iframe.src = 'about:blank';
       });
     }
 
-    window.addEventListener('message', (event) => {
-      const data = event.data;
-
-      if (!data || typeof data !== 'object' || !data.requestId) {
-        return;
+    function submitCompletionPage(fields) {
+      if (
+        !BACKEND_URL ||
+        BACKEND_URL.includes('PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE')
+      ) {
+        throw new Error('BACKEND_URL is not configured in index.html.');
       }
 
-      const pending = pendingRequests.get(data.requestId);
-      if (!pending) return;
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = BACKEND_URL;
+      form.target = '_self';
+      form.style.display = 'none';
 
-      pendingRequests.delete(data.requestId);
-      pending.resolve(data);
-    });
+      Object.entries(fields).forEach(([key, value]) => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = key;
+        input.value = value == null ? '' : String(value);
+        form.appendChild(input);
+      });
+
+      document.body.appendChild(form);
+      form.submit();
+    }
 
     function setStatus(index, text, kind) {
       const el = document.getElementById(`status-${index}`);
@@ -704,10 +694,17 @@
       el.className = `status ${kind || ''}`;
     }
 
-    function updateFinishSummary() {
-      const saved = Object.values(states).filter(s => s.uploaded).length;
-      document.getElementById('finishSummary').textContent =
-        `${saved} answer${saved === 1 ? '' : 's'} saved`;
+    function updateFinishSummary(customText = '') {
+      const summary = document.getElementById('finishSummary');
+
+      if (customText) {
+        summary.textContent = customText;
+        return;
+      }
+
+      const ready = Object.values(states).filter(s => s.blob).length;
+      summary.textContent =
+        `${ready} answer${ready === 1 ? '' : 's'} ready to save`;
     }
 
     async function finalizeQuestionnaire() {
@@ -716,52 +713,78 @@
 
       const finishBtn = document.getElementById('finishBtn');
       finishBtn.disabled = true;
-      finishBtn.textContent = 'Finishing…';
+      finishBtn.textContent = 'Saving…';
 
       try {
-        const activeUploads = Object.values(states)
-          .map(s => s.uploadPromise)
-          .filter(Boolean);
+        // If the respondent clicks Save and Exit while still recording,
+        // stop the active recording(s) first and keep the final audio.
+        await stopActiveRecordings();
 
-        if (activeUploads.length) {
-          await Promise.allSettled(activeUploads);
-        }
+        const recordedEntries = Object.entries(states)
+          .filter(([, state]) => state.blob);
 
-        const answered = Object.entries(states)
-          .filter(([, s]) => s.uploaded)
-          .map(([i]) => Number(i) + 1);
-
-        if (!answered.length) {
-          alert('Please record and successfully upload at least one answer.');
+        if (!recordedEntries.length) {
+          alert('Please record at least one answer before saving.');
+          finishBtn.disabled = false;
+          finishBtn.textContent = 'Save and Exit';
+          updateFinishSummary();
           return;
         }
 
-        const result = await submitToBackend({
-          action: 'finalize',
-          accessCode: identity.accessCode,
-          respondentName: lockedRespondentName || identity.respondentName,
-          sessionId: sessionId,
-          answeredQuestions: answered.join(',')
-        });
+        const answeredNumbers = [];
 
-        if (!result.ok) {
-          throw new Error(result.error || 'Could not finalize.');
+        for (let pos = 0; pos < recordedEntries.length; pos++) {
+          const [indexText, state] = recordedEntries[pos];
+          const index = Number(indexText);
+          const questionNumber = index + 1;
+
+          updateFinishSummary(
+            `Saving answer ${pos + 1} of ${recordedEntries.length}…`
+          );
+
+          setStatus(index, 'Saving to Google Drive…', '');
+
+          const audioBase64 = await blobToBase64(state.blob);
+
+          await submitUploadAndWait({
+            action: 'upload',
+            accessCode: identity.accessCode,
+            respondentName: identity.respondentName,
+            sessionId: sessionId,
+            questionNumber: String(questionNumber),
+            mimeType: state.blob.type || 'audio/webm',
+            audioBase64: audioBase64
+          });
+
+          state.saved = true;
+          answeredNumbers.push(questionNumber);
+          setStatus(index, 'Saved successfully.', 'success');
         }
 
-        document.getElementById('questionsContainer').style.display = 'none';
-        document.querySelector('.respondent-card').style.display = 'none';
-        document.getElementById('finishBar').style.display = 'none';
-        document.getElementById('doneMessage').style.display = 'block';
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        updateFinishSummary('All recordings saved. Finishing…');
+        finishBtn.textContent = 'Finishing…';
+
+        /*
+         * Navigate directly to the Apps Script completion response.
+         * The backend verifies the expected Qxx files exist before showing
+         * the thank-you page.
+         */
+        submitCompletionPage({
+          action: 'complete',
+          accessCode: identity.accessCode,
+          respondentName: identity.respondentName,
+          sessionId: sessionId,
+          answeredQuestions: answeredNumbers.join(',')
+        });
+
       } catch (err) {
         console.error(err);
         alert(
-          'Your already-saved recordings are safe, but the final completion step failed. ' +
-          'Please try Save and Exit again.'
+          'The recordings could not all be saved. Please keep this page open and try Save and Exit again.'
         );
-      } finally {
         finishBtn.disabled = false;
         finishBtn.textContent = 'Save and Exit';
+        updateFinishSummary();
       }
     }
 
